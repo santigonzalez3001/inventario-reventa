@@ -124,6 +124,7 @@ def actualizar_producto(producto_id: int, **campos) -> dict:
 
 def eliminar_producto(producto_id: int):
     conn = get_connection()
+    conn.execute("DELETE FROM ventas WHERE producto_id=?", (producto_id,))
     conn.execute("DELETE FROM productos WHERE id=?", (producto_id,))
     conn.commit()
     conn.close()
