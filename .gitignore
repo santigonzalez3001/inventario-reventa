@@ -1,0 +1,7 @@
+inventario.db
+fotos/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.streamlit/secrets.toml
