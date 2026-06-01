@@ -1,32 +1,29 @@
 """
-Funciones CRUD para todas las entidades de la app.
-Cada función recibe parámetros explícitos y retorna dicts o listas de dicts.
+CRUD para todas las entidades usando Supabase (PostgreSQL).
+Las firmas de las funciones son idénticas a la versión SQLite para que
+las páginas no necesiten cambios.
 """
 import json
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, date
 from typing import Optional
-from .schema import get_connection
+
+from .supabase_client import get_supabase
 from utils.sku import generar_sku
 
 
 # ─── CATEGORÍAS ──────────────────────────────────────────────────────────────
 
 def listar_categorias() -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute("SELECT * FROM categorias ORDER BY nombre").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    sb = get_supabase()
+    resp = sb.table("categorias").select("*").order("nombre").execute()
+    return resp.data
 
 
 def crear_categoria(nombre: str) -> dict:
-    conn = get_connection()
-    cur = conn.execute(
-        "INSERT INTO categorias (nombre, predefinida) VALUES (?, 0)", (nombre.strip(),)
-    )
-    conn.commit()
-    cat = conn.execute("SELECT * FROM categorias WHERE id=?", (cur.lastrowid,)).fetchone()
-    conn.close()
-    return dict(cat)
+    sb = get_supabase()
+    resp = sb.table("categorias").insert({"nombre": nombre.strip(), "predefinida": 0}).execute()
+    return resp.data[0]
 
 
 # ─── PRODUCTOS ───────────────────────────────────────────────────────────────
@@ -46,36 +43,29 @@ def crear_producto(
 ) -> dict:
     sku = generar_sku(marca, modelo, talla)
     fecha = datetime.now().strftime("%Y-%m-%d")
-    canales_json = json.dumps(canales or [])
-
-    conn = get_connection()
-    cur = conn.execute(
-        """
-        INSERT INTO productos
-            (sku, categoria_id, modelo, marca, talla, color,
-             precio_compra, precio_venta, canales, fecha_ingreso,
-             notas, descripcion_ml, precio_referencia)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            sku, categoria_id, modelo.strip(), marca.strip(),
-            talla.strip(), color.strip(), precio_compra, precio_venta,
-            canales_json, fecha, notas, descripcion_ml, precio_referencia,
-        ),
-    )
-    conn.commit()
-    producto = conn.execute(
-        "SELECT * FROM productos WHERE id=?", (cur.lastrowid,)
-    ).fetchone()
-    conn.close()
-    return _producto_dict(producto)
+    sb = get_supabase()
+    resp = sb.table("productos").insert({
+        "sku": sku,
+        "categoria_id": categoria_id,
+        "modelo": modelo.strip(),
+        "marca": marca.strip(),
+        "talla": talla.strip(),
+        "color": color.strip(),
+        "precio_compra": precio_compra,
+        "precio_venta": precio_venta,
+        "canales": json.dumps(canales or []),
+        "fecha_ingreso": fecha,
+        "notas": notas,
+        "descripcion_ml": descripcion_ml,
+        "precio_referencia": precio_referencia,
+    }).execute()
+    return _producto_dict(resp.data[0])
 
 
 def obtener_producto(producto_id: int) -> Optional[dict]:
-    conn = get_connection()
-    row = conn.execute("SELECT * FROM productos WHERE id=?", (producto_id,)).fetchone()
-    conn.close()
-    return _producto_dict(row) if row else None
+    sb = get_supabase()
+    resp = sb.table("productos").select("*").eq("id", producto_id).execute()
+    return _producto_dict(resp.data[0]) if resp.data else None
 
 
 def listar_productos(
@@ -83,55 +73,44 @@ def listar_productos(
     categoria_id: Optional[int] = None,
     busqueda: str = "",
 ) -> list[dict]:
-    sql = """
-        SELECT p.*, c.nombre AS categoria_nombre
-        FROM productos p
-        JOIN categorias c ON p.categoria_id = c.id
-        WHERE 1=1
-    """
-    params = []
+    sb = get_supabase()
+    query = sb.table("productos").select("*, categorias(nombre)")
     if estado:
-        sql += " AND p.estado = ?"
-        params.append(estado)
+        query = query.eq("estado", estado)
     if categoria_id:
-        sql += " AND p.categoria_id = ?"
-        params.append(categoria_id)
+        query = query.eq("categoria_id", categoria_id)
     if busqueda:
-        sql += " AND (p.modelo LIKE ? OR p.marca LIKE ? OR p.sku LIKE ?)"
-        like = f"%{busqueda}%"
-        params.extend([like, like, like])
-    sql += " ORDER BY p.fecha_ingreso DESC, p.id DESC"
+        query = query.or_(
+            f"modelo.ilike.%{busqueda}%,marca.ilike.%{busqueda}%,sku.ilike.%{busqueda}%"
+        )
+    query = query.order("fecha_ingreso", desc=True).order("id", desc=True)
+    resp = query.execute()
 
-    conn = get_connection()
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
-    return [_producto_dict(r) for r in rows]
+    result = []
+    for row in resp.data:
+        d = dict(row)
+        cat = d.pop("categorias", None) or {}
+        d["categoria_nombre"] = cat.get("nombre", "")
+        result.append(_producto_dict(d))
+    return result
 
 
 def actualizar_producto(producto_id: int, **campos) -> dict:
     if "canales" in campos and isinstance(campos["canales"], list):
         campos["canales"] = json.dumps(campos["canales"])
-
-    sets = ", ".join(f"{k}=?" for k in campos)
-    valores = list(campos.values()) + [producto_id]
-    conn = get_connection()
-    conn.execute(f"UPDATE productos SET {sets} WHERE id=?", valores)
-    conn.commit()
-    row = conn.execute("SELECT * FROM productos WHERE id=?", (producto_id,)).fetchone()
-    conn.close()
-    return _producto_dict(row)
+    sb = get_supabase()
+    resp = sb.table("productos").update(campos).eq("id", producto_id).execute()
+    return _producto_dict(resp.data[0])
 
 
 def eliminar_producto(producto_id: int):
-    conn = get_connection()
-    conn.execute("DELETE FROM ventas WHERE producto_id=?", (producto_id,))
-    conn.execute("DELETE FROM productos WHERE id=?", (producto_id,))
-    conn.commit()
-    conn.close()
+    sb = get_supabase()
+    sb.table("ventas").delete().eq("producto_id", producto_id).execute()
+    sb.table("productos").delete().eq("id", producto_id).execute()
 
 
-def _producto_dict(row) -> dict:
-    if row is None:
+def _producto_dict(row: dict) -> dict:
+    if not row:
         return {}
     d = dict(row)
     try:
@@ -144,35 +123,35 @@ def _producto_dict(row) -> dict:
 # ─── FOTOS ───────────────────────────────────────────────────────────────────
 
 def agregar_foto(producto_id: int, ruta: str, orden: int = 0):
-    conn = get_connection()
-    conn.execute(
-        "INSERT INTO fotos (producto_id, ruta, orden) VALUES (?,?,?)",
-        (producto_id, ruta, orden),
-    )
-    conn.commit()
-    conn.close()
+    sb = get_supabase()
+    sb.table("fotos").insert({
+        "producto_id": producto_id,
+        "ruta": ruta,
+        "orden": orden,
+    }).execute()
 
 
 def listar_fotos(producto_id: int) -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM fotos WHERE producto_id=? ORDER BY orden", (producto_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    sb = get_supabase()
+    resp = (
+        sb.table("fotos")
+        .select("*")
+        .eq("producto_id", producto_id)
+        .order("orden")
+        .execute()
+    )
+    return resp.data
 
 
 def eliminar_foto(foto_id: int):
-    conn = get_connection()
-    conn.execute("DELETE FROM fotos WHERE id=?", (foto_id,))
-    conn.commit()
-    conn.close()
+    sb = get_supabase()
+    sb.table("fotos").delete().eq("id", foto_id).execute()
 
 
 # ─── VENTAS ──────────────────────────────────────────────────────────────────
 
 COMISIONES = {
-    "MercadoLibre": 0.14,
+    "MercadoLibre": 0.16,   # ~16 % para tenis/ropa (rango real: 8 %–22 %)
     "Instagram":    0.0,
     "Facebook":     0.0,
     "Efectivo":     0.0,
@@ -180,71 +159,75 @@ COMISIONES = {
 }
 
 
+def comision_fija_ml(precio: float) -> float:
+    """Cargo fijo de MercadoLibre Colombia por unidad vendida (2025)."""
+    if precio <= 30_000:
+        return 2_500
+    if precio <= 60_000:
+        return 4_000
+    return 0
+
+
 def registrar_venta(
     producto_id: int,
     precio_final: float,
     canal: str,
     comision_pct: Optional[float] = None,
+    costo_envio: float = 0.0,
     notas: str = "",
 ) -> dict:
     if comision_pct is None:
         comision_pct = COMISIONES.get(canal, 0.0)
 
+    fija = comision_fija_ml(precio_final) if canal == "MercadoLibre" else 0.0
     producto = obtener_producto(producto_id)
     precio_compra = producto["precio_compra"] if producto else 0
     comision_monto = precio_final * comision_pct
-    margen_neto = precio_final - comision_monto - precio_compra
-
+    margen_neto = precio_final - comision_monto - fija - costo_envio - precio_compra
     fecha = datetime.now().strftime("%Y-%m-%d")
-    conn = get_connection()
-    cur = conn.execute(
-        """
-        INSERT INTO ventas
-            (producto_id, precio_final, canal, comision_pct, margen_neto, fecha_venta, notas)
-        VALUES (?,?,?,?,?,?,?)
-        """,
-        (producto_id, precio_final, canal, comision_pct, margen_neto, fecha, notas),
-    )
-    venta_id = cur.lastrowid
 
-    # Marcar producto como vendido
-    conn.execute(
-        "UPDATE productos SET estado='vendido' WHERE id=?", (producto_id,)
-    )
+    sb = get_supabase()
+    resp = sb.table("ventas").insert({
+        "producto_id": producto_id,
+        "precio_final": precio_final,
+        "canal": canal,
+        "comision_pct": comision_pct,
+        "comision_fija": fija,
+        "costo_envio": costo_envio,
+        "margen_neto": margen_neto,
+        "fecha_venta": fecha,
+        "notas": notas,
+    }).execute()
+    venta = resp.data[0]
 
-    # Registrar en caja: ingreso por venta
-    conn.execute(
-        """
-        INSERT INTO caja (tipo, concepto, monto, fecha, referencia)
-        VALUES ('ingreso', ?, ?, ?, ?)
-        """,
-        (
-            f"Venta {producto['marca']} {producto['modelo']} – {canal}",
-            precio_final - comision_monto,
-            fecha,
-            f"venta:{venta_id}",
-        ),
-    )
-    conn.commit()
-    venta = conn.execute("SELECT * FROM ventas WHERE id=?", (venta_id,)).fetchone()
-    conn.close()
-    return dict(venta)
+    sb.table("productos").update({"estado": "vendido"}).eq("id", producto_id).execute()
+    sb.table("caja").insert({
+        "tipo": "ingreso",
+        "concepto": f"Venta {producto['marca']} {producto['modelo']} – {canal}",
+        "monto": precio_final - comision_monto - fija,
+        "fecha": fecha,
+        "referencia": f"venta:{venta['id']}",
+    }).execute()
+
+    return venta
 
 
 def listar_ventas(limite: int = 200) -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute(
-        """
-        SELECT v.*, p.marca, p.modelo, p.talla, p.sku, p.precio_compra
-        FROM ventas v
-        JOIN productos p ON v.producto_id = p.id
-        ORDER BY v.fecha_venta DESC
-        LIMIT ?
-        """,
-        (limite,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    sb = get_supabase()
+    resp = (
+        sb.table("ventas")
+        .select("*, productos(marca, modelo, talla, sku, precio_compra)")
+        .order("fecha_venta", desc=True)
+        .limit(limite)
+        .execute()
+    )
+    result = []
+    for row in resp.data:
+        d = dict(row)
+        prod_info = d.pop("productos", None) or {}
+        d.update(prod_info)
+        result.append(d)
+    return result
 
 
 # ─── CAJA ────────────────────────────────────────────────────────────────────
@@ -253,22 +236,21 @@ def registrar_movimiento_caja(
     tipo: str, concepto: str, monto: float, referencia: str = ""
 ):
     fecha = datetime.now().strftime("%Y-%m-%d")
-    conn = get_connection()
-    conn.execute(
-        "INSERT INTO caja (tipo, concepto, monto, fecha, referencia) VALUES (?,?,?,?,?)",
-        (tipo, concepto, monto, fecha, referencia),
-    )
-    conn.commit()
-    conn.close()
+    sb = get_supabase()
+    sb.table("caja").insert({
+        "tipo": tipo,
+        "concepto": concepto,
+        "monto": monto,
+        "fecha": fecha,
+        "referencia": referencia,
+    }).execute()
 
 
 def resumen_caja() -> dict:
-    conn = get_connection()
-    rows = conn.execute("SELECT tipo, SUM(monto) as total FROM caja GROUP BY tipo").fetchall()
-    conn.close()
-    totales = {r["tipo"]: r["total"] for r in rows}
-    ingresos = totales.get("ingreso", 0) or 0
-    egresos = totales.get("egreso", 0) or 0
+    sb = get_supabase()
+    resp = sb.table("caja").select("tipo, monto").execute()
+    ingresos = sum(r["monto"] for r in resp.data if r["tipo"] == "ingreso")
+    egresos  = sum(r["monto"] for r in resp.data if r["tipo"] == "egreso")
     return {
         "ingresos_totales": ingresos,
         "egresos_totales": egresos,
@@ -277,60 +259,71 @@ def resumen_caja() -> dict:
 
 
 def listar_movimientos_caja(limite: int = 100) -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM caja ORDER BY fecha DESC, id DESC LIMIT ?", (limite,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    sb = get_supabase()
+    resp = (
+        sb.table("caja")
+        .select("*")
+        .order("fecha", desc=True)
+        .order("id", desc=True)
+        .limit(limite)
+        .execute()
+    )
+    return resp.data
 
 
 # ─── MÉTRICAS (dashboard) ────────────────────────────────────────────────────
 
 def metricas_dashboard() -> dict:
-    conn = get_connection()
+    sb = get_supabase()
+    mes_actual = datetime.now().strftime("%Y-%m")
 
-    total_productos = conn.execute(
-        "SELECT COUNT(*) FROM productos WHERE estado != 'vendido'"
-    ).fetchone()[0]
+    prods = sb.table("productos").select("estado, precio_compra").execute().data
+    total_productos = sum(1 for p in prods if p["estado"] != "vendido")
+    valor_stock     = sum(p["precio_compra"] for p in prods if p["estado"] == "disponible")
 
-    valor_stock = conn.execute(
-        "SELECT SUM(precio_compra) FROM productos WHERE estado='disponible'"
-    ).fetchone()[0] or 0
+    ventas_mes = (
+        sb.table("ventas")
+        .select("margen_neto, precio_final")
+        .gte("fecha_venta", f"{mes_actual}-01")
+        .execute()
+        .data
+    )
+    ventas_mes_unidades = len(ventas_mes)
+    ventas_mes_ingresos = sum(v["precio_final"]  for v in ventas_mes)
+    ventas_mes_margen   = sum(v["margen_neto"]   for v in ventas_mes)
 
-    ventas_mes = conn.execute(
-        """
-        SELECT COUNT(*) as unidades, SUM(margen_neto) as margen, SUM(precio_final) as ingresos
-        FROM ventas
-        WHERE strftime('%Y-%m', fecha_venta) = strftime('%Y-%m', 'now')
-        """
-    ).fetchone()
+    todas_ventas = sb.table("ventas").select("margen_neto").execute().data
+    margen_promedio = (
+        sum(v["margen_neto"] for v in todas_ventas) / len(todas_ventas)
+        if todas_ventas else 0
+    )
 
-    margen_promedio = conn.execute(
-        "SELECT AVG(margen_neto) FROM ventas"
-    ).fetchone()[0] or 0
+    ventas_con_prod = (
+        sb.table("ventas")
+        .select("fecha_venta, productos(fecha_ingreso)")
+        .execute()
+        .data
+    )
+    dias_list = []
+    for v in ventas_con_prod:
+        prod_info = v.get("productos") or {}
+        fi = prod_info.get("fecha_ingreso")
+        if fi:
+            dias_list.append(
+                (date.fromisoformat(v["fecha_venta"]) - date.fromisoformat(fi)).days
+            )
+    dias_promedio = sum(dias_list) / len(dias_list) if dias_list else 0
 
-    dias_promedio = conn.execute(
-        """
-        SELECT AVG(julianday(v.fecha_venta) - julianday(p.fecha_ingreso))
-        FROM ventas v
-        JOIN productos p ON v.producto_id = p.id
-        """
-    ).fetchone()[0] or 0
-
-    ventas_por_canal = conn.execute(
-        "SELECT canal, COUNT(*) as total FROM ventas GROUP BY canal"
-    ).fetchall()
-
-    conn.close()
+    canales_resp = sb.table("ventas").select("canal").execute().data
+    ventas_por_canal = dict(Counter(v["canal"] for v in canales_resp))
 
     return {
-        "productos_activos": total_productos,
-        "valor_stock": valor_stock,
-        "ventas_mes_unidades": ventas_mes["unidades"] or 0,
-        "ventas_mes_ingresos": ventas_mes["ingresos"] or 0,
-        "ventas_mes_margen": ventas_mes["margen"] or 0,
-        "margen_promedio": margen_promedio,
+        "productos_activos":    total_productos,
+        "valor_stock":          valor_stock,
+        "ventas_mes_unidades":  ventas_mes_unidades,
+        "ventas_mes_ingresos":  ventas_mes_ingresos,
+        "ventas_mes_margen":    ventas_mes_margen,
+        "margen_promedio":      margen_promedio,
         "dias_promedio_inventario": round(dias_promedio, 1),
-        "ventas_por_canal": {r["canal"]: r["total"] for r in ventas_por_canal},
+        "ventas_por_canal":     ventas_por_canal,
     }

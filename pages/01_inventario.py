@@ -67,7 +67,6 @@ with st.expander("+ Registrar nuevo producto", expanded=False):
             canales = st.multiselect("Canales de publicación", CANALES_DISPONIBLES)
             notas = st.text_area("Notas", height=80)
 
-        # Área de descripción — se puede prellenar con IA o escribir manualmente
         descripcion_ml = st.text_area(
             "Descripción para MercadoLibre",
             value=st.session_state.get("desc_generada", ""),
@@ -81,15 +80,12 @@ with st.expander("+ Registrar nuevo producto", expanded=False):
 
         col_ia, col_guardar = st.columns([1, 2])
         with col_ia:
-            generar = st.form_submit_button(
-                "Generar con IA", use_container_width=True
-            )
+            generar = st.form_submit_button("Generar con IA", use_container_width=True)
         with col_guardar:
             enviado = st.form_submit_button(
                 "Guardar producto", use_container_width=True, type="primary"
             )
 
-        # ── Acción: generar descripción con IA ──
         if generar:
             if not marca or not modelo:
                 st.error("Ingresa Marca y Modelo antes de generar.")
@@ -111,7 +107,6 @@ with st.expander("+ Registrar nuevo producto", expanded=False):
                     st.success("Descripción generada. Revísala y ajusta si es necesario.")
                     st.rerun()
 
-        # ── Acción: guardar producto ──
         if enviado:
             if not marca or not modelo or precio_compra <= 0:
                 st.error("Completa los campos obligatorios: Marca, Modelo y Precio de compra.")
@@ -132,7 +127,6 @@ with st.expander("+ Registrar nuevo producto", expanded=False):
                         precio_referencia=st.session_state.get("precio_ref_ia"),
                     )
                     st.success(f"Producto registrado. SKU: **{nuevo['sku']}**")
-                    # Limpiar estado temporal de IA
                     for k in ["desc_generada", "precio_ref_ia"]:
                         st.session_state.pop(k, None)
                     st.session_state["producto_recien_creado"] = nuevo["id"]
@@ -145,7 +139,7 @@ with st.expander("+ Registrar nuevo producto", expanded=False):
 if "producto_recien_creado" in st.session_state:
     pid = st.session_state["producto_recien_creado"]
     with st.expander(f"Subir fotos para el producto #{pid}", expanded=True):
-        widget_fotos(pid)
+        widget_fotos(pid, prefix="new_")
         if st.button("Listo, cerrar fotos"):
             del st.session_state["producto_recien_creado"]
             st.rerun()
@@ -180,10 +174,13 @@ else:
         lambda x: f"${x:,.0f}" if x else "—"
     )
 
-    st.dataframe(
+    st.caption("Haz clic en una fila para ver el detalle completo del producto.")
+    event = st.dataframe(
         df[columnas_mostrar],
         use_container_width=True,
         hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
         column_config={
             "sku": "SKU",
             "marca": "Marca",
@@ -200,20 +197,78 @@ else:
     )
     st.caption(f"Total: {len(productos)} productos")
 
+    # ── Detalle del producto al hacer clic en una fila ───────────────────────
+    filas_seleccionadas = event.selection.rows if event.selection else []
+    if filas_seleccionadas:
+        idx = filas_seleccionadas[0]
+        prod = productos[idx]
+        st.session_state["pid_seleccionado"] = prod["id"]
+
+        with st.expander(
+            f"Detalle: {prod['marca']} {prod['modelo']} — {prod['sku']}",
+            expanded=True,
+        ):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**SKU:** {prod['sku']}")
+                st.markdown(f"**Marca:** {prod['marca']}")
+                st.markdown(f"**Modelo:** {prod['modelo']}")
+                st.markdown(f"**Talla:** {prod.get('talla') or '—'}")
+                st.markdown(f"**Color:** {prod.get('color') or '—'}")
+                st.markdown(f"**Categoría:** {prod.get('categoria_nombre') or '—'}")
+                st.markdown(f"**Fecha ingreso:** {prod.get('fecha_ingreso') or '—'}")
+            with c2:
+                estado_emoji = {"disponible": "🟢", "reservado": "🟡", "vendido": "🔴"}.get(
+                    prod["estado"], ""
+                )
+                st.markdown(f"**Estado:** {estado_emoji} {prod['estado']}")
+                st.markdown(f"**Precio compra:** ${prod['precio_compra']:,.0f}")
+                pv = prod.get("precio_venta")
+                st.markdown(f"**Precio venta:** {'${:,.0f}'.format(pv) if pv else '—'}")
+                pr = prod.get("precio_referencia")
+                st.markdown(f"**Ref. mercado:** {'${:,.0f}'.format(pr) if pr else '—'}")
+                canales_str = ", ".join(prod.get("canales") or []) or "—"
+                st.markdown(f"**Canales:** {canales_str}")
+            if prod.get("notas"):
+                st.markdown(f"**Notas:** {prod['notas']}")
+            if prod.get("descripcion_ml"):
+                with st.expander("Descripción para MercadoLibre"):
+                    st.markdown(prod["descripcion_ml"])
+
+            st.subheader("Fotos")
+            widget_fotos(prod["id"], prefix="detail_")
+
 
 # ─── DETALLE / EDICIÓN ────────────────────────────────────────────────────────
 st.divider()
 st.subheader("Editar producto")
 
-if productos:
-    opciones_ids = {
-        f"{p['sku']} — {p['marca']} {p['modelo']}": p["id"] for p in productos
-    }
-    seleccion = st.selectbox("Seleccionar producto", list(opciones_ids.keys()))
-    pid_editar = opciones_ids[seleccion]
-    p = next(x for x in productos if x["id"] == pid_editar)
+# Usar todos los productos (sin filtro) para que los vendidos también sean editables/eliminables
+todos_productos = listar_productos()
 
-    # Botón de regenerar descripción con IA (fuera del form para no bloquear)
+if todos_productos:
+    # Pre-seleccionar el producto que se hizo clic en la tabla
+    default_idx = 0
+    if "pid_seleccionado" in st.session_state:
+        sid = st.session_state["pid_seleccionado"]
+        for i, tp in enumerate(todos_productos):
+            if tp["id"] == sid:
+                default_idx = i
+                break
+
+    opciones_ids = {
+        f"{p['sku']} — {p['marca']} {p['modelo']} [{p['estado']}]": p["id"]
+        for p in todos_productos
+    }
+    seleccion = st.selectbox(
+        "Seleccionar producto",
+        list(opciones_ids.keys()),
+        index=default_idx,
+    )
+    pid_editar = opciones_ids[seleccion]
+    p = next(x for x in todos_productos if x["id"] == pid_editar)
+
+    # Botón de regenerar descripción con IA (fuera del form)
     col_regen, _ = st.columns([1, 3])
     with col_regen:
         if st.button("Regenerar descripción con IA", key="regen_ia"):
@@ -235,8 +290,12 @@ if productos:
                     precio_referencia=resultado.precio_referencia,
                 )
                 st.success(
-                    f"Descripción actualizada."
-                    + (f" Precio ref: ${resultado.precio_referencia:,.0f}" if resultado.precio_referencia else "")
+                    "Descripción actualizada."
+                    + (
+                        f" Precio ref: ${resultado.precio_referencia:,.0f}"
+                        if resultado.precio_referencia
+                        else ""
+                    )
                 )
                 st.rerun()
 
@@ -271,29 +330,22 @@ if productos:
             height=200,
         )
 
-        col_guardar, col_eliminar = st.columns([3, 1])
-        with col_guardar:
-            if st.form_submit_button("Guardar cambios", use_container_width=True):
-                actualizar_producto(
-                    pid_editar,
-                    marca=nueva_marca,
-                    modelo=nuevo_modelo,
-                    talla=nueva_talla,
-                    color=nuevo_color,
-                    precio_compra=nuevo_precio_compra,
-                    precio_venta=nuevo_precio_venta if nuevo_precio_venta > 0 else None,
-                    estado=nuevo_estado,
-                    canales=nuevos_canales,
-                    notas=nuevas_notas,
-                    descripcion_ml=nueva_descripcion,
-                )
-                st.success("Producto actualizado.")
-                st.rerun()
-        with col_eliminar:
-            if st.form_submit_button("Eliminar", type="secondary", use_container_width=True):
-                eliminar_producto(pid_editar)
-                st.warning("Producto eliminado.")
-                st.rerun()
+        if st.form_submit_button("Guardar cambios", use_container_width=True, type="primary"):
+            actualizar_producto(
+                pid_editar,
+                marca=nueva_marca,
+                modelo=nuevo_modelo,
+                talla=nueva_talla,
+                color=nuevo_color,
+                precio_compra=nuevo_precio_compra,
+                precio_venta=nuevo_precio_venta if nuevo_precio_venta > 0 else None,
+                estado=nuevo_estado,
+                canales=nuevos_canales,
+                notas=nuevas_notas,
+                descripcion_ml=nueva_descripcion,
+            )
+            st.success("Producto actualizado.")
+            st.rerun()
 
     # Mostrar descripción actual si existe
     if p.get("descripcion_ml"):
@@ -301,4 +353,22 @@ if productos:
             st.markdown(p["descripcion_ml"])
 
     st.subheader("Fotos del producto")
-    widget_fotos(pid_editar)
+    widget_fotos(pid_editar, prefix="edit_")
+
+    # ── Eliminar producto (fuera del form, con confirmación) ─────────────────
+    st.divider()
+    with st.expander("Eliminar producto", expanded=False):
+        st.warning(
+            f"Esto eliminará permanentemente **{p['marca']} {p['modelo']}** "
+            f"({p['sku']}) junto con sus ventas y fotos asociadas."
+        )
+        confirmar = st.checkbox("Confirmar eliminación", key="check_eliminar")
+        if confirmar:
+            if st.button("Eliminar permanentemente", type="secondary", key="btn_eliminar"):
+                try:
+                    eliminar_producto(pid_editar)
+                    st.session_state.pop("pid_seleccionado", None)
+                    st.success("Producto eliminado.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al eliminar: {e}")

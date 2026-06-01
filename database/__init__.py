@@ -1,4 +1,5 @@
-from .schema import get_connection, crear_tablas
+from .supabase_client import get_supabase
+from .schema import crear_tablas
 
-# Crear tablas al importar el módulo, independiente de qué página cargue primero
+# Mantener compatibilidad: crear_tablas es no-op en la versión cloud
 crear_tablas()
