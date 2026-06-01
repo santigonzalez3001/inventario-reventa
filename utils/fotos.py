@@ -8,7 +8,7 @@ import streamlit as st
 from database.supabase_client import get_supabase
 from database.models import agregar_foto, listar_fotos, eliminar_foto
 
-BUCKET = "fotos"
+BUCKET = "Fotos"
 MAX_FOTOS = 10
 EXTENSIONES_PERMITIDAS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
